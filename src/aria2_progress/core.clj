@@ -1,34 +1,24 @@
 (ns aria2-progress.core
-  (:require [clojure.java.io :as io])
-  (:require [clojure.math.numeric-tower :as math])
+  (:require 
+    [aria2-progress.parser :refer [parse]]
+    [clojure.java.io :as io]
+    [clojure.math.numeric-tower :as math]
+    [seesaw.core :refer :all] 
+    [seesaw.graphics :refer :all]
+    [seesaw.color :refer :all])
   (:gen-class))
 
 (def progress (atom ""))
+(def block-per-row (atom 20))
 
-(defn file-to-bytes [file]
-  (with-open [in (io/input-stream file)]
-    (let [buf (byte-array (.length (io/file file)))]
-      (.read in buf)
-      buf)))
+(def block-style
+  {:complete (style :background (color 66 214 146) :foreground (color 242 242 242) :stroke 1)
+   :partial (style :background (color 49 242 24) :foreground (color 242 242 242) :stroke 1)
+   :empty (style :background (color 178 178 178) :foreground (color 242 242 242) :stroke 1)})
 
-(defn bytes-to-int [xs]
-  (reduce (fn [acc x]
-           (+ 
-             (Byte/toUnsignedInt x) 
-             (* 256 acc)))
-          xs))
-
-(defn byte-to-bin [x]
-  (apply str (take-last 8 (str "0000000" (Integer/toBinaryString (Byte/toUnsignedInt x))))))
-
-(defn parse [x]
-  (let [
-        [head more] (split-at 30 x)
-        [bf-len more] (split-at 4 more)
-        [bf more] (split-at (bytes-to-int bf-len) more)]
-   {:head head
-    :bf-len bf-len
-    :bit-field (apply str (map byte-to-bin bf))}))
+(def block-size 10)
+(def padding-horizontal 11)
+(def padding-vertical 41)
 
 
 (defn update-progress [old-x x]
@@ -50,19 +40,60 @@
     (println (apply str (repeat n "-")))
     (dorun (map #(println (apply str %)) field))))
 
-         
+(defn make-rect [index bit]
+  (let [x (* block-size (mod index @block-per-row))
+        y (* block-size (int (/ index @block-per-row)))]
+    [(rect x y block-size block-size) 
+     (condp = bit
+       \0 (block-style :empty)
+       \1 (block-style :complete)
+       \x (block-style :partial))]))
+
+
+(defn render [context graphics]
+  (doseq [[r s] (map-indexed make-rect @progress)]
+    (draw graphics r s)))
+
+
+(defn make-window []
+  (let [len (count @progress)
+        new-block-per-row (int (math/ceil (math/sqrt len)))
+        row-number (int (/ len new-block-per-row))
+        w (+ padding-horizontal (* new-block-per-row block-size)) 
+        h (+ padding-vertical (* block-size row-number))]
+    (reset! block-per-row new-block-per-row)
+    (native!)
+    (-> (frame
+          :id :root
+          :title "aria2 progress"
+          :minimum-size [w :by h]
+          :on-close :dispose
+          :content 
+          (border-panel
+            :hgap 5 :vgap 5 :border 5
+            :center (canvas 
+                      :id :canvas 
+                      :paint render)))
+        show!)))
+
+(defn parse-loop [x w]
+  (if-not (.exists (io/file x))
+    (println (str x "doesn't exist anymore"))
+    (do 
+      (->> x 
+           parse
+           :bit-field
+           (swap! progress update-progress)
+           (print-bf))
+      (if (nil? w)
+        (recur x (make-window)) 
+        (do
+          (repaint! w) 
+          (Thread/sleep 2000)
+          (recur x w))))))
+
 (defn -main [x]
   (if-not (.exists (io/file x))
     (println (str x " not found"))
-    (do 
-      (->> x 
-          file-to-bytes
-          parse
-           :bit-field
-          (swap! progress update-progress)
-          (print-bf))
-      (Thread/sleep 2000)
-      (recur x))))
-
-
+    (parse-loop x nil)))
 
